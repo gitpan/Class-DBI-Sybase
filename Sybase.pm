@@ -47,7 +47,7 @@ use base qw(Class::DBI);
 
 use vars qw($VERSION);
 
-$VERSION = '0.3';
+$VERSION = '0.31';
 
 sub _die { require Carp; Carp::croak(@_); } 
 
@@ -140,6 +140,8 @@ sub _insert_row {
 		if (@identity_columns == 1 && !defined $data->{$identity_columns[0]}) {
 			$data->{$identity_columns[0]} = $id;
 		}
+
+		$sth->finish() if $sth->{'Active'};
 	};
 
 	if ($@) {
