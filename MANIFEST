@@ -1,0 +1,6 @@
+MANIFEST
+Makefile.PL
+lib/Class/DBI/Sybase.pm
+lib/Class/DBI/FreeTDS.pm
+test.pl
+META.yml                                Module meta-data (added by MakeMaker)
