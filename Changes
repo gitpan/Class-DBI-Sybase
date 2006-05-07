@@ -1,3 +1,6 @@
+0.4 - Sun May 7 15:06:00 EST 2006
+
+	Added support for TEXT columns, fixed minor warnings when table has no IDENTITY columns
 
 0.31 - Wed Oct 20 09:34:57 PDT 2004
 
@@ -5,4 +8,4 @@
 
 0.3  - Wed Oct 20 09:20:29 PDT 2004
 
-	Patch from Michael Wojcikewicz to add identity column support.
+	Patch from Michael Wojcikiewicz to add identity column support.

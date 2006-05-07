@@ -22,6 +22,7 @@ This is an extension to Class::DBI that currently implements:
 
 	* Automatic column name discovery.
 	* Works with IDENTITY columns to auto-generate primary keys.
+	* Works with TEXT columns for create() and update()
 	
 Instead of setting Class::DBI as your base class, use this.
 
@@ -34,7 +35,9 @@ active, even though it's not. We override sth_to_objects to call finish() on the
 
 Dan Sully E<lt>daniel@cpan.orgE<gt>
 
-Michael Wojcikewicz E<lt>mike@perlpimps.comE<gt>
+Michael Wojcikewicz E<lt>theothermike@gmail.com<gt>
+
+Paul Sandulescu E<lt>paul.sandulescu@mail.mcgill.com<gt>
 
 =head1 SEE ALSO
 
@@ -43,11 +46,10 @@ L<Class::DBI>, L<DBD::Sybase>
 =cut
 
 use strict;
-use base qw(Class::DBI);
+use base 'Class::DBI';
 
 use vars qw($VERSION);
-
-$VERSION = '0.31';
+$VERSION = '0.4';
 
 sub _die { require Carp; Carp::croak(@_); } 
 
@@ -59,7 +61,8 @@ VALUES (%s)
 SELECT @@IDENTITY
 
 
-sub set_up_table {
+sub set_up_table 
+{
 	my($class, $table) = @_;
 	my $dbh = $class->db_Main();
 
@@ -77,19 +80,18 @@ sub set_up_table {
 	$class->columns(All => map {$_->[3]} @$col);
 	$class->columns(Primary => $col->[0][3]);
 
+	# find any text columns that will get quoted upon INSERT
+	$class->columns(TEXT => map { $_->[5] eq 'text' ? $_->[3] : () } @$col);
+
 	# now find the IDENTITY column
 	$sth = $dbh->prepare("sp_help $table");
-	$sth->execute();
-
+	$sth -> execute();
 	# the first two resultsets contain no info about finding the identity column
-	$sth->fetchall_arrayref() for 1..2; 
-	$col = $sth->fetchall_arrayref(); 
+	$sth -> fetchall_arrayref() for 1 .. 2; 
+	$col = $sth -> fetchall_arrayref(); 
 
-	# the 10th column contains a boolean denoting whether it's an IDENTITY
-	my ($identity) = grep($_->[9] == 1, @$col);
-
-	# store the IDENTITY column	
-	$class->columns(IDENTITY => $identity->[0]) if $identity;
+	my ($identity) = grep( $_ -> [9] == 1, @$col ); # the 10th column contains a boolean denoting whether it's an IDENTITY
+	$class -> columns(IDENTITY => $identity -> [0]) if $identity; # store the IDENTITY column	
 }
 
 # Fixes a DBD::Sybase problem where the handle is still active.
@@ -103,59 +105,99 @@ sub sth_to_objects {
 		$sth = $class->$meth();
 	}
 
-	$sth->finish() if $sth->{'Active'};
+	$sth->finish() if $sth->{Active};
 
 	return $class->SUPER::sth_to_objects($sth, $args);
 }
 
-sub _insert_row {
+sub _column_placeholder 
+{
 	my $self = shift;
+	my $column = shift;
 	my $data = shift;
+	my @text_columns = $self -> columns('TEXT');
 
-	my @identity_columns = $self->columns('IDENTITY');
+	# if its a text column, we need to $dbh -> quote() it, rather than using a placeholder, limitation of Sybase TDS libraries
+	if ($data && grep { $_ eq $column } @text_columns)
+	{
+		return $self -> db_Main -> quote($data);
+	}
+	else
+	{
+		return $self -> SUPER::_column_placeholder( $column );
+	}
+}
 
-	eval {
-		my @columns = ();
-		my @values  = ();
+sub _insert_row 
+{
+    my $self = shift;
+    my $data = shift;
+	my @identity_columns = $self -> primary_columns;
+	my @text_columns = $self -> columns('TEXT');
+
+    eval {
+		my @columns;
+		my @values;
 
 		# Omit the IDENTITY column to let it be Auto Generated
 		for my $column (keys %$data) {
-
-			unless ($column eq $identity_columns[0]) {
-				push @columns, $column;
-				push @values, $data->{$column};
-			}
+			next if defined $identity_columns[0] && $column eq $identity_columns[0];
+			
+			push @columns, $column;
+			# Omit the text column since it needs to be quoted
+			push @values, $data -> {$column} unless grep { $_ eq $column } @text_columns; 
 		}
+        my $sth = $self->sql_MakeNewObj(
+										join(', ', @columns),
+										join(', ', map $self->_column_placeholder($_, $data -> {$_}), @columns), # this uses the new placeholder methods that quotes
+										);
+        $self->_bind_param($sth, \@columns);
+        $sth->execute(@values);
 
-		my $sth = $self->sql_MakeNewObj(
-			join(', ', @columns),
-			join(', ', map $self->_column_placeholder($_), @columns),
-		);
+		my $id = $sth -> fetchrow_arrayref() -> [0];
 
-		$self->_bind_param($sth, \@columns);
-		$sth->execute(@values);
+        $data->{ $identity_columns[0] } = $id
+            if @identity_columns == 1
+            && !defined $data->{ $identity_columns[0] };
+		$sth->finish if $sth -> {Active};
+    };
+    if ($@) {
+        my $class = ref $self;
+        return $self->_croak(
+            "Can't insert new $class: $@",
+            err    => $@,
+            method => 'create'
+							 );
+    }
+    return 1;
+}
 
-		my $id = $sth->fetchrow_arrayref()->[0];
+sub _update_vals 
+{
+	my $self = shift;
+	my @text_columns = $self -> columns('TEXT');
 
-		if (@identity_columns == 1 && !defined $data->{$identity_columns[0]}) {
-			$data->{$identity_columns[0]} = $id;
-		}
+	my @changed = $self -> is_changed();
+	my @columns;
 
-		$sth->finish() if $sth->{'Active'};
-	};
-
-	if ($@) {
-		my $class = ref($self);
-
-		return $self->_croak("Can't insert new $class: $@",
-			'err'    => $@,
-			'method' => 'create',
-		);
+	foreach my $changed (@changed)
+	{
+		# omit TEXT columns from the update clause since they are quoted
+		push @columns, $changed unless grep { $_ eq $changed } @text_columns;
 	}
 
-	return 1;
+	return $self -> _attrs(@columns);
+}
+
+sub _update_line 
+{
+	my $self = shift;
+
+	# use our custom _column_placeholder that quotes TEXT columns
+	return join(', ', map "$_ = " . $self -> _column_placeholder($_, $self -> $_()), $self -> is_changed);
 }
 
 1;
 
-__END__
+# TODO: LIMIT ?
+
